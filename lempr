@@ -1,0 +1,549 @@
+#!/bin/bash
+LASTMODIFIED="2021/03/16"
+SCRIPTVERSION="0.1"
+OSRELEASE=$(grep PRETTY_NAME /etc/os-release)
+
+# COLORS
+BOLD=$(tput bold)
+NORMAL=$(tput sgr0)
+GREEN=$(tput setaf 2)
+LBLUE=$(tput setaf 6)
+RED=$(tput setaf 1)
+PURPLE=$(tput setaf 5)
+YELLOW=$(tput setaf 3)
+BLUE=$(tput setaf 4)
+CYAN=$(tput setaf 6)
+WHITE=$(tput setaf 7)
+
+#function OSRELEASE {}
+
+clear
+
+function CHECK_ROOT {
+	if [ "$(id -u)" != "0" ]; then
+		echo
+		echo "${RED}Este script debe ejecutarse con privilegios de Administrador." 1>&2
+		echo
+		exit 1
+	fi
+}
+
+function SET_VARS {
+        echo
+        echo "${GREEN}[#]${NORMAL} Introducir información necesaria"
+        echo
+        read -p "Introduce el nombre de tu dominio (domain.tld): " DOMAIN_TLD
+        read -p "Introduce tu correo electronico: " EMAIL_SITE
+        read -p "Introduce un titulo original para tu web: " WP_TITLE
+        read -p "Introduce tu usuario para Wordpress: " WP_USERNAME
+        read -sp "Contraseña de usuario para Wordpress (Oculta): " WP_PASSWORD
+        echo
+        
+        DB_PASSWORD=$(tr -dc A-Za-z0-9_ < /dev/urandom | head -c 24 | xargs)
+        DB_DATABASE=$(tr -dc A-Za-z0-9_ < /dev/urandom | head -c 12 | xargs)
+        DB_USERNAME=$(tr -dc A-Za-z0-9_ < /dev/urandom | head -c 12 | xargs)
+        DB_PREFIX=$(printf "%s_" "$(tr -dc a-z < /dev/urandom | head -c 2)")
+        DIR_TLD=/etc/nginx/sites-available/$DOMAIN_TLD
+}
+
+function INITIAL_SETUP {
+        echo
+        echo "${GREEN}[#]${NORMAL} Actualización y configuración del sistema"
+        echo
+        apt-get update > /dev/null 2>&1
+        apt-get -q -y upgrade
+        apt-get -q -y dist-upgrade > /dev/null 2>&1
+        apt-get install -q -y unzip htop git fail2ban coreutils dpkg-dev gcc make build-essential autoconf automake libtool gettext pkg-config libpcre3 libpcre3-dev libxml2 libxml2-dev libcurl4 libgeoip-dev libyajl-dev doxygen > /dev/null
+        apt-get autoremove -y > /dev/null && apt-get clean > /dev/null && apt-get autoclean > /dev/null
+        rm /etc/localtime && ln -fs /usr/share/zoneinfo/Europe/Madrid /etc/localtime > /dev/null && dpkg-reconfigure -f noninteractive tzdata > /dev/null 2>&1
+        sed -i 's/en_US.UTF-8 UTF-8/# en_US.UTF-8 UTF-8/g' /etc/locale.gen && sed -i 's/# es_ES.UTF-8 UTF-8/es_ES.UTF-8 UTF-8/g' /etc/locale.gen && locale-gen > /dev/null 2>&1
+        hostnamectl set-hostname $DOMAIN_TLD > /dev/null 2>&1
+        ufw allow 22 > /dev/null && ufw allow 80 > /dev/null && ufw allow 443 > /dev/null && ufw --force enable > /dev/null 2>&1
+        rm /etc/ssh/ssh_host_rsa_key* && rm /etc/ssh/ssh_host_dsa_key* && rm /etc/ssh/ssh_host_ecdsa_key* && rm /etc/ssh/ssh_host_ed25519_key*
+        ssh-keygen -f /etc/ssh/ssh_host_rsa_key -t rsa -b 4096  -q -N "" && ssh-keygen -f /etc/ssh/ssh_host_dsa_key -t dsa  -q -N ""
+        ssh-keygen -f /etc/ssh/ssh_host_ecdsa_key -t ecdsa -b 521  -q -N "" && ssh-keygen -f /etc/ssh/ssh_host_ed25519_key -t ed25519  -q -N ""
+}
+
+#function CREATE_USER {
+#        read -p "Introduce un usuario SUDO para el Sistema: " SUDO_USER
+#        adduser --gecos "" $SUDO_USER
+#        usermod -aG sudo $SUDO_USER
+#}
+
+#function TUNE_SYSTEM {}
+
+function ADD_LEMPR_STACK {
+        echo
+        echo "${GREEN}[#]${NORMAL} Añadir repositorios para LEMP+R"
+        echo
+        add-apt-repository ppa:ondrej/nginx-mainline -y > /dev/null 2>&1
+        add-apt-repository ppa:ondrej/php -y > /dev/null 2>&1
+        add-apt-repository ppa:redislabs/redis -y > /dev/null 2>&1
+        apt-key adv --fetch-keys 'https://mariadb.org/mariadb_release_signing_key.asc' > /dev/null 2>&1
+        echo 'deb http://mariadb.mirror.triple-it.nl/repo/10.5/ubuntu focal main' > /etc/apt/sources.list.d/mariadb-ubuntu-focal.list
+        add-apt-repository ppa:redislabs/redis -y > /dev/null 2>&1
+        apt-get update > /dev/null && apt-get upgrade -y > /dev/null 2>&1
+}
+
+function INSTALL_LEMPR_STACK {
+        echo
+        echo "${GREEN}[#]${NORMAL} Instalación del servidor web (LEMP+R Stack)"
+        echo
+        apt-get install -q -y nginx mariadb-server mariadb-client redis-server php8.0-fpm php8.0-common php8.0-mysql php8.0-xml php8.0-xmlrpc php8.0-curl php8.0-gd php8.0-imagick php8.0-cli php8.0-dev php8.0-imap php8.0-mbstring php8.0-opcache php8.0-redis php8.0-soap php8.0-zip > /dev/null 2>&1
+        systemctl enable nginx > /dev/null && systemctl enable mariadb > /dev/null && systemctl enable php8.0-fpm > /dev/null && systemctl enable redis-server > /dev/null
+        systemctl reload-or-restart nginx && systemctl reload-or-restart mariadb && systemctl reload-or-restart php8.0-fpm && systemctl reload-or-restart redis-server
+        echo -e "\nn\nn\ny\ny\ny\ny\n" | mysql_secure_installation > /dev/null 2>&1
+}
+
+function PREPARE_NGINX {
+        echo
+        echo "${GREEN}[#]${NORMAL} Crear carpetas y archivos necesarios"
+        echo
+        #CORES=$(grep processor /proc/cpuinfo | wc -l)
+        mkdir /etc/nginx/orig/ /etc/nginx/global/
+        mv /etc/nginx/nginx.conf /etc/nginx/orig/
+        rm /etc/nginx/sites-available/default && rm /etc/nginx/sites-enabled/default
+        mkdir -p /var/www/$DOMAIN_TLD/logs /var/www/$DOMAIN_TLD/public_html
+}
+
+function TUNE_PHP {
+        echo
+        echo "${GREEN}[#]${NORMAL} Configuración de PHP 8"
+        echo
+        sed -i "s/upload_max_filesize = 2M/upload_max_filesize = 128M/g" /etc/php/8.0/fpm/php.ini
+        sed -i "s/post_max_size = 8M/post_max_size = 128M/g" /etc/php/8.0/fpm/php.ini
+        sed -i "s/;opcache.enable=1/opcache.enable=1/g" /etc/php/8.0/fpm/php.ini
+        sed -i "s/;opcache.memory_consumption=128/opcache.memory_consumption=128/g" /etc/php/8.0/fpm/php.ini
+        sed -i "s/;opcache.max_accelerated_files=3000/opcache.max_accelerated_files=3000/g" /etc/php/8.0/fpm/php.ini
+        sed -i "s/;opcache.revalidate_freq=200/opcache.revalidate_freq=200/g" /etc/php/8.0/fpm/php.ini
+        sed -i "s/pm = dynamic/pm = static/g" /etc/php/8.0/fpm/pool.d/www.conf
+        sed -i "s/pm.max_children = 5/pm.max_children = 10/g" /etc/php/8.0/fpm/pool.d/www.conf
+}
+
+function NGINX_FILES { 
+
+######## fastcgi_params ########
+        
+        echo 'fastcgi_param  SCRIPT_FILENAME    $document_root$fastcgi_script_name;' >> /etc/nginx/fastcgi_params
+
+######## global/http.conf ########
+
+cat > "/etc/nginx/global/http.conf" << 'EOF'
+        charset utf-8;
+        sendfile on;
+        tcp_nodelay on;
+        tcp_nopush on;
+        server_tokens off;
+        keepalive_timeout 15s;
+        send_timeout 30s;
+        client_body_timeout 30s;
+        client_header_timeout 30s;
+        client_max_body_size 128m;
+EOF
+
+######## global/gzip.conf ########
+
+cat > "/etc/nginx/global/gzip.conf" << 'EOF'
+        gzip on;
+        gzip_disable "msie6";
+        gzip_vary on;
+        gzip_proxied any;
+        gzip_comp_level 5;
+        gzip_http_version 1.1;
+        gzip_min_length 256;
+        gzip_types
+                application/atom+xml
+                application/javascript
+                application/json
+                application/ld+json
+                application/manifest+json
+                application/rss+xml
+                application/vnd.geo+json
+                application/vnd.ms-fontobject
+                application/x-font-ttf
+                application/x-web-app-manifest+json
+                application/xhtml+xml
+                application/xml
+                font/opentype
+                image/bmp
+                image/svg+xml
+                image/x-icon
+                text/cache-manifest
+                text/css
+                text/plain
+                text/vcard
+                text/vnd.rim.location.xloc
+                text/vtt
+                text/x-component
+                text/x-cross-domain-policy;
+EOF
+
+######## global/brotli.conf ########
+
+cat > "/etc/nginx/global/brotli.conf" << 'EOF'
+brotli on;
+        brotli_comp_level 6;
+        brotli_static on;
+        brotli_types application/atom+xml application/javascript application/json application/rss+xml
+             application/vnd.ms-fontobject application/x-font-opentype application/x-font-truetype
+             application/x-font-ttf application/x-javascript application/xhtml+xml application/xml
+             font/eot font/opentype font/otf font/truetype image/svg+xml image/vnd.microsoft.icon
+             image/x-icon image/x-win-bitmap text/css text/javascript text/plain text/xml;
+EOF
+
+######## global/security_headers.conf ########
+
+cat > "/etc/nginx/global/security_headers.conf" << 'EOF'
+add_header X-Frame-Options "SAMEORIGIN";
+add_header X-Content-Type-Options "nosniff";
+add_header X-Xss-Protection "1; mode=block";
+add_header Strict-Transport-Security "max-age=63072000; includeSubDomains; preload" always;
+add_header Referrer-Policy "no-referrer-when-downgrade" always;
+add_header Expect-CT max-age=86400,enforce;
+add_header Cross-Origin-Opener-Policy "same-origin";
+add_header Cross-Origin-Embedder-Policy "unsafe-none";
+add_header Cross-Origin-Resource-Policy (same-site|same-origin|cross-origin);
+add_header Content-Security-Policy "default-src 'self' https://*.google-analytics.com https://*.googleapis.com https://*.gstatic.com https://*.gravatar.com https://*.w.org data: 'unsafe-inline' 'unsafe-eval';" always; 
+EOF
+
+######## global/ssl.conf ########
+
+cat > "/etc/nginx/global/ssl.conf" << 'EOF'
+ssl_protocols TLSv1.2 TLSv1.3;
+ssl_ciphers EECDH+CHACHA20:EECDH+AES;
+ssl_ecdh_curve X25519:prime256v1:secp521r1:secp384r1;
+ssl_prefer_server_ciphers on;
+ssl_session_cache shared:SSL:10m;
+ssl_session_timeout 1d;
+ssl_session_tickets off;
+ssl_buffer_size 8k;
+ssl_certificate /etc/letsencrypt/live/domain.tld/fullchain.pem;
+ssl_certificate_key /etc/letsencrypt/live/domain.tld/privkey.pem;
+ssl_trusted_certificate /etc/letsencrypt/live/domain.tld/chain.pem;
+ssl_stapling on; 
+ssl_stapling_verify on;
+resolver 1.1.1.1 1.0.0.1 [2606:4700:4700::1111] [2606:4700:4700::1001] 8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844] 208.67.222.222 208.67.220.220 [2620:119:35::35] [2620:119:53::53] 9.9.9.9 149.112.112.112 [2620:fe::fe] [2620:fe::9] valid=60s;
+resolver_timeout 2s;
+EOF
+        sed -i "s/domain.tld/$DOMAIN_TLD/g" /etc/nginx/global/ssl.conf
+
+cat > "/etc/nginx/global/fastcgi_headers.conf" << 'EOF'
+        add_header Fastcgi-Cache $upstream_cache_status;
+EOF
+
+######## global/fastcgi_cache.conf ########
+
+cat > "/etc/nginx/global/fastcgi_cache.conf" << 'EOF'
+        fastcgi_cache_key "$scheme$request_method$host$request_uri";
+        fastcgi_cache_use_stale error timeout updating invalid_header http_500;
+        fastcgi_ignore_headers Cache-Control Expires Set-Cookie;
+        set $skip_cache 0;
+        if ($request_method = POST) {
+                set $skip_cache 1;
+        }
+        if ($query_string != "") {
+                set $skip_cache 1;
+        }
+        if ($request_uri ~* "/wp-admin/|/wp-json/|/xmlrpc.php|wp-.*.php|/feed/|index.php|sitemap(_index)?.xml|/cart/|/checkout/|/my-account/") {
+                set $skip_cache 1;
+        }
+        if ($http_cookie ~* "comment_author|wordpress_[a-f0-9]+|wp-postpass|wordpress_no_cache|wordpress_logged_in|edd_items_in_cart|woocommerce_items_in_cart") {
+                set $skip_cache 1;
+        }
+EOF
+
+######## global/cache-control.conf ########
+
+cat > "/etc/nginx/global/cache-control.conf" << 'EOF'
+        location ~* \.(?:manifest|appcache|html?|xml|json)$ {
+                expires 0;
+        }
+        location ~* \.(?:rss|atom)$ {
+                expires 1h;
+        }
+        location ~* \.(?:css(\.map)?|js(\.map)?|jpe?g|png|gif|ico|cur|heic|webp|tiff?|mp3|m4a|aac|ogg|midi?|wav|mp4|mov|webm|mpe?g|avi|ogv|flv|wmv)$ {
+                expires    7d;
+                access_log off;
+        }
+        location ~* \.(?:svgz?|ttf|ttc|otf|eot|woff2?)$ {
+                add_header Access-Control-Allow-Origin "*";
+                expires    7d;
+                access_log off;
+        }
+        location ~ /(favicon.ico|favicon.png|robots.txt)$ {
+                access_log off;
+                log_not_found off;
+                expires 1y;
+                add_header Cache-Control public,max-age=259200;
+        }
+EOF
+
+######## global/exclusions.conf ########
+
+cat > "/etc/nginx/global/exclusions.conf" << 'EOF'
+        location ~ /\.(?!well-known) {
+                deny all;
+        }
+        
+        location ~\.(ini|log|conf)$ {
+                deny all;
+        }
+        
+        location ~* /(?:uploads|files)/.*\.php$ {
+                deny all;
+        }
+
+        location ~ /\.ht {
+                deny all;
+        }
+        
+        location = /favicon.ico {
+                deny all;
+        }
+        
+        location ~* ^/(?:wp-content|wp-includes)/.*\.php$ {
+                deny all;
+        }
+
+        location ~* ^/wp-content/uploads/.*\.(?:s?html?|php|js|swf)$ {
+                deny all;
+        }
+
+        location ~* ^/wp-content/plugins/wordpress-seo(?:-premium)?/css/main-sitemap\.xsl$ {}
+
+        location ~ ^/wp-content/plugins {
+                deny all;
+        }
+
+        location ~* ^/(?:xmlrpc\.php|wp-links-opml\.php|wp-config\.php|wp-config-sample\.php|wp-comments-post\.php|readme\.html|license\.txt)$ {
+                deny all;
+        }
+EOF
+
+######## nginx.conf ########
+
+cat > "/etc/nginx/nginx.conf" << 'EOF'
+user www-data;
+worker_processes auto;
+worker_rlimit_nofile 65535;
+pid /run/nginx.pid;
+include /etc/nginx/modules-enabled/*.conf;
+
+events {
+	worker_connections 65535;
+        multi_accept on;
+}
+
+http {
+	include global/http.conf;
+
+	include mime.types;
+	default_type application/octet-stream;
+
+	fastcgi_buffers 8 16k;
+	fastcgi_buffer_size 32k;
+
+	error_log /var/log/nginx/error.log warn;
+	access_log /var/log/nginx/access.log;
+
+	include global/gzip.conf;
+
+        server {
+                listen 80 default_server;
+                listen [::]:80 default_server;
+                server_name _;
+                return 444;
+        }
+
+	include /etc/nginx/conf.d/*.conf;
+	include /etc/nginx/sites-enabled/*;
+}
+EOF
+
+}
+
+function CERTBOT {
+
+######## VHOST_HTTP ########
+
+cat > $DIR_TLD << 'EOF'
+server {
+    listen 80;
+    server_name domain.tld;
+    root /var/www/domain.tld/public_html;
+
+    index index.html index.htm index.php;
+
+    location / {
+        try_files $uri $uri/ =404;
+    }
+ 
+    location ~ /\.ht {
+        deny all;
+    }
+}
+EOF
+
+        sed -i "s/domain.tld/$DOMAIN_TLD/g" /etc/nginx/sites-available/$DOMAIN_TLD
+        echo
+        echo "${GREEN}[#]${NORMAL} Instalando certificado SSL Let's Encrypt"
+        echo
+        apt-get install certbot python3-certbot-nginx -y > /dev/null 2>&1
+        certbot certonly --non-interactive --nginx --agree-tos --no-eff-email --rsa-key-size 4096 --redirect --hsts --must-staple --staple-ocsp --email $EMAIL_SITE -d $DOMAIN_TLD > /dev/null 2>&1
+
+}
+
+function NGINX_VHOST_HTTPS { 
+
+######## VHOST_HTTPS ########
+
+cat > $DIR_TLD << 'EOF'
+fastcgi_cache_path /var/www/domain.tld/cache levels=1:2 keys_zone=domain.tld:64m inactive=60m;
+
+server {
+	listen 443 ssl http2;
+	listen [::]:443 ssl http2 ipv6only=on;
+        server_name domain.tld;
+        root /var/www/domain.tld/public_html;
+        index index.php;
+
+	access_log /var/www/domain.tld/logs/access.log;
+	error_log /var/www/domain.tld/logs/error.log;
+
+        include global/ssl.conf;
+
+        include global/security_headers.conf;
+    
+        include global/fastcgi_headers.conf;
+        include global/fastcgi_cache.conf;
+
+        include global/cache-control.conf;
+
+        include global/exclusions.conf;
+
+	location / {
+		try_files $uri $uri/ /index.php?$args;
+	}
+
+    location ~ \.php$ {
+        try_files $uri $uri/ /index.php?$args;
+        fastcgi_split_path_info ^(.+\.php)(/.+)$;
+        fastcgi_pass unix:/run/php/php8.0-fpm.sock;
+        fastcgi_index index.php;
+        include fastcgi_params;
+        fastcgi_cache_bypass $skip_cache;
+	fastcgi_no_cache $skip_cache;
+	fastcgi_cache domain.tld;
+	fastcgi_cache_valid 60m;
+    }
+
+}
+
+server {
+	listen 80;
+	listen [::]:80;
+	server_name domain.tld;
+
+	return 301 https://domain.tld$request_uri;
+}
+
+server {
+    listen                  443 ssl http2;
+    listen                  [::]:443 ssl http2;
+    server_name             *.domain.tld;
+
+    ssl_certificate         /etc/letsencrypt/live/domain.tld/fullchain.pem;
+    ssl_certificate_key     /etc/letsencrypt/live/domain.tld/privkey.pem;
+    ssl_trusted_certificate /etc/letsencrypt/live/domain.tld/chain.pem;
+    return                  301 https://domain.tld$request_uri;
+}
+EOF
+
+        sed -i "s/domain.tld/$DOMAIN_TLD/g" /etc/nginx/sites-available/$DOMAIN_TLD
+        ln -s /etc/nginx/sites-available/$DOMAIN_TLD /etc/nginx/sites-enabled/
+}
+
+function WP-CLI {
+        echo
+        echo "${GREEN}[#]${NORMAL} Descarga e instalación de WP-CLI"
+        echo
+        curl -O https://raw.githubusercontent.com/wp-cli/builds/gh-pages/phar/wp-cli.phar > /dev/null 2>&1
+        chmod +x wp-cli.phar
+        mv wp-cli.phar /usr/local/bin/wp
+}
+
+function CONFIGURE_DATABASE {
+        echo
+        echo "${GREEN}[#]${NORMAL} Creando la base de datos, usuario y contraseña"
+        echo
+        mysql -e "CREATE DATABASE $DB_DATABASE DEFAULT CHARACTER SET utf8 COLLATE utf8_unicode_ci;"
+        mysql -e "CREATE USER '$DB_USERNAME'@'localhost' IDENTIFIED BY '$DB_PASSWORD';"
+        mysql -e "GRANT ALL ON $DB_DATABASE.* TO '$DB_USERNAME'@'localhost';"
+}
+
+function INSTALL_WORDPRESS { 
+        echo
+        echo "${GREEN}[#]${NORMAL} Instalando la ultima versión de Wordpress"
+        echo
+        cd /var/www/$DOMAIN_TLD/public_html
+        wp core download --locale=es_ES --allow-root > /dev/null 2>&1
+        wp core config --allow-root --dbname=$DB_DATABASE --dbuser=$DB_USERNAME --dbpass=$DB_PASSWORD --dbhost=localhost --dbprefix=$DB_PREFIX > /dev/null 2>&1
+        wp core install --allow-root --url=https://$DOMAIN_TLD --title="${WP_TITLE}" --admin_user=$WP_USERNAME --admin_email=$EMAIL_SITE --admin_password=$WP_PASSWORD > /dev/null 2>&1
+        wp theme install --allow-root generatepress --activate > /dev/null 2>&1
+}
+
+function FIX_PERMISSIONS {
+        echo
+        echo "${GREEN}[#]${NORMAL} Ajustando los permisos necesarios"
+        echo
+        chmod -R 755 /var/www/$DOMAIN_TLD/
+        chown -R www-data:www-data /var/www/$DOMAIN_TLD/public_html/
+        chown -R www-data:www-data /var/www/$DOMAIN_TLD/logs/
+        find /var/www/$DOMAIN_TLD/public_html/ -type d -exec chmod 755 {} \;
+        find /var/www/$DOMAIN_TLD/public_html/ -type f -exec chmod 644 {} \;
+        chmod 440 /var/www/$DOMAIN_TLD/public_html/wp-config.php
+}
+
+function RELOAD_SERVICES {
+        systemctl reload-or-restart nginx && systemctl reload-or-restart mariadb && systemctl reload-or-restart php8.0-fpm && systemctl reload-or-restart redis-server
+}
+
+function FINISH_INSTALL {
+        echo
+        echo
+        echo "${GREEN}[#]${NORMAL} Puede acceder a su web desde la URL https://${DOMAIN_TLD} con el usuario y contraseña introducido anteriormente."
+        echo
+        echo
+}
+
+#function BACKUPS_POLICY {}
+
+function UNSET_VARS {
+        unset DOMAIN_TLD && unset EMAIL_SITE && unset DB_DATABASE && unset DB_USERNAME && unset DB_PASSWORD && unset DB_PREFIX && unset WP_TITLE && unset WP_USERNAME && unset WP_PASSWORD
+        unset BOLD && unset NORMAL && unset GREEN && unset LBLUE && unset RED && unset PURPLE && unset YELLOW && unset BLUE && unset CYAN && unset WHITE
+        unset LASTMODIFIED && unset SCRIPTVERSION && unset OSRELEASE
+}
+
+CHECK_ROOT
+SET_VARS
+INITIAL_SETUP
+#TUNE_SYSTEM
+ADD_LEMPR_STACK
+INSTALL_LEMPR_STACK
+PREPARE_NGINX
+TUNE_PHP
+NGINX_FILES
+CERTBOT
+NGINX_VHOST_HTTPS
+WP-CLI
+CONFIGURE_DATABASE
+INSTALL_WORDPRESS
+FIX_PERMISSIONS
+RELOAD_SERVICES
+FINISH_INSTALL
+BACKUPS_POLICY
+UNSET_VARS
+
+#function MOD_SECURITY {}
+
+#MOD_SECURITY
